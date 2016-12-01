@@ -22,6 +22,7 @@ const path = require('path');
 
 const rd = require('rd');
 const beautify = require('js-beautify').js_beautify;
+const babylon = require('babylon');
 
 const publicAlias = [/\$/, 'vue', 'FastClick', 'TouchSlide', 'DropLoad', /^vendors\/*/];
 
@@ -70,14 +71,15 @@ function resolveAllRequires(files, keyFileMap) {
 			let oneFile = filesList[0];
 			if (!oneFile) return resolve();
 			fs.readFile(oneFile, 'utf-8', (err, data) => {
+				// console.log(oneFile);
 				if (err) reject(err);
+				let resultData = data;
 				let match = requireRegexp.exec(data);
 				while (match != null) {
-
 					// 替换 require 的 module 的路径
 					if (keyFileMap[match[1]]) {
 						// 存在相应的文件
-						data = data.replace(match[0], `require('${relativePath(oneFile, keyFileMap[match[1]])}')`)
+						resultData = resultData.replace(match[0], `require('${relativePath(oneFile, keyFileMap[match[1]])}')`)
 					} else if (publicAlias.filter((item) => {
 						return new RegExp(item).test(match[1]);
 					}).length) {
@@ -85,25 +87,58 @@ function resolveAllRequires(files, keyFileMap) {
 						// console.log(match[1]);
 					} else {
 						// 没有定义 moduleID，以 h5/src/js 作为跟路径找对应文件
-						data = data.replace(match[0], `require('${relativePath(oneFile, findFileByRoot(match[1], h5SrcJsPath))}')`)
+						resultData = resultData.replace(match[0], `require('${relativePath(oneFile, findFileByRoot(match[1], h5SrcJsPath))}')`)
+						// console.log(match[1] + '======');
 					}
 
 					match = requireRegexp.exec(data);
 				}
-				// 掐头去尾
-				data = data.replace(/define\((?:\'|\")([\s\S]+?)(?:\'|\")([\s\S]+?)\n/, '').replace(/\s+$|\n+$|\r\n+$/, '').replace(/\}\)(?:\;|)$/, '');
-				fs.writeFileSync(oneFile, beautify(data, {
-					"indent_size": 4,
-					"indent_with_tabs": true,
-					"eol": "\n",
-					"space_after_anon_function": false,
-					"end_with_newline": true,
-					"space_before_conditional": true,
-					"space_in_empty_paren": false,
-					"space_in_paren": false,
-					"unescape_strings": false,
-					"wrap_line_length": 0
-				}));
+				// 去掉 $ 的 require ，在 webpack 中注入，单引号双引号，var 的存在，结尾分号和逗号的匹配
+				resultData = resultData.replace(/require\([\'|\"]\$[\'|\"]\)[?:\,|\;]|var[\s\S]+?require\([\'|\"]\$[\'|\"]\)[?:\,|\;]/g, '');
+
+				let AST = null;
+
+				try {
+					AST = babylon.parse(resultData, {
+						allowReturnOutsideFunction: true,
+						sourceType: "module",
+						plugins: ['*']
+					});
+
+				} catch(e) {
+					console.log(oneFile + '解析出错');
+					console.log(e);
+				}
+
+				try {
+					let name = AST.program.body[0].expression.callee.name;
+					if (name === 'define') {
+
+						resultData = resultData.replace(/\$/g, '#');
+
+						let bodyStart = AST.program.body[0].start;
+						let bodyEnd = AST.program.body[0].end;
+
+						// console.log(resultData.substring(bodyStart, bodyEnd));
+
+						let mainStart = AST.program.body[0].expression.arguments[1].body.start;
+						let mainEnd = AST.program.body[0].expression.arguments[1].body.end;
+
+
+						// console.log(resultData.substring(mainStart, mainEnd).replace(/^\{|\}$/g, ''));
+
+						resultData = resultData.replace(resultData.substring(bodyStart, bodyEnd), resultData.substring(mainStart, mainEnd).replace(/^\{|\}$/g, '')).replace(/#/g, '$')
+
+					} else {
+						console.log(oneFile + ': 不是标准文件');
+					}
+				} catch(e) {
+					// console.log(oneFile + '解析出错');
+					// console.log(e);
+				}
+
+
+				fs.writeFileSync(oneFile, resultData);
 				filesList.splice(0, 1);
 				loop();
 			});
